@@ -1059,7 +1059,7 @@ private struct ChildScrollViewInfo {
             overlay.leadingAnchor.constraint(equalTo: superview.leadingAnchor),
             overlay.trailingAnchor.constraint(equalTo: superview.trailingAnchor),
             overlay.heightAnchor.constraint(equalTo: superview.heightAnchor),
-            overlay.bottomAnchor.constraint(equalTo: self.topAnchor)
+            overlay.bottomAnchor.constraint(equalTo: superview.bottomAnchor)
         ]
 
         for constraint in constraints {
