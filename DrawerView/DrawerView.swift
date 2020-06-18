@@ -129,6 +129,15 @@ private struct ChildScrollViewInfo {
         case disabled
     }
 
+    public enum OpenHeightBehavior {
+        /// The default, fully expand the drawer when open.
+        case none
+        /// Use `systemLayoutSizeFitting` to determine the height of the drawer.
+        case fitting
+        /// Use fixed height.
+        case fixed(height: CGFloat)
+    }
+
     // MARK: - Visual properties
 
     /// The corner radius of the drawer view.
@@ -184,6 +193,12 @@ private struct ChildScrollViewInfo {
         }
     }
 
+    public var openHeightBehavior: OpenHeightBehavior = .none {
+        didSet {
+            setNeedsRespositioning()
+        }
+    }
+
     public var automaticallyAdjustChildContentInset: Bool = true {
         didSet {
             safeAreaInsetsDidChange()
@@ -205,18 +220,19 @@ private struct ChildScrollViewInfo {
         }
     }
 
-    public func setConcealed(_ concealed: Bool, animated: Bool) {
+    public func setConcealed(_ concealed: Bool, animated: Bool, completion: ((Bool) -> Void)? = nil) {
         _isConcealed = concealed
-        setPosition(currentPosition, animated: animated)
+        setPosition(currentPosition, animated: animated, completion: completion)
     }
 
-    public func removeFromSuperview(animated: Bool) {
+    public func removeFromSuperview(animated: Bool, completion: ((Bool) -> Void)? = nil) {
         guard let superview = superview else { return }
 
         let pos = snapPosition(for: .closed, inSuperView: superview)
         self.scrollToPosition(pos, animated: animated, notifyDelegate: true) { _ in
             self.removeFromSuperview()
             self.overlay?.removeFromSuperview()
+            completion?(true)
         }
     }
 
@@ -282,7 +298,7 @@ private struct ChildScrollViewInfo {
     /// Attaches the drawer to the given view. The drawer will update its constraints
     /// to match the bounds of the target view.
     ///
-    /// - parameter view The view to attach to.
+    /// - parameter view The view to contain the drawer in.
     public func attachTo(view: UIView) {
 
         if self.superview == nil {
@@ -308,6 +324,7 @@ private struct ChildScrollViewInfo {
             constraint?.isActive = true
         }
 
+        setNeedsRespositioning()
         updateVisuals()
     }
 
@@ -357,6 +374,7 @@ private struct ChildScrollViewInfo {
         }
     }
 
+    public var drawerAnimationDuration: Double = 0.5
     /// An opacity (0 to 1) used for automatically hiding child views. This is made public so that
     /// you can match the opacity with your custom views.
     public private(set) var currentChildOpacity: CGFloat = 1.0
@@ -369,7 +387,7 @@ private struct ChildScrollViewInfo {
 
     private var horizontalPanOnly: Bool = true
 
-    private var startedDragging: Bool = false
+    private var drawerPanStarted: Bool = false
 
     private var previousAnimator: UIViewPropertyAnimator? = nil
 
@@ -382,6 +400,9 @@ private struct ChildScrollViewInfo {
     fileprivate var childScrollViews: [ChildScrollViewInfo] = []
 
     private var overlay: Overlay?
+
+    /// Lazily remove the overlay. Needed to lazily remove overlay after animation.
+    private var shouldRemoveOverlay: Bool = false
 
     private let borderView = UIView()
 
@@ -398,6 +419,8 @@ private struct ChildScrollViewInfo {
     private let embeddedView: UIView?
 
     private var hiddenChildViews: [UIView]?
+
+    private var needsRespositioning = false
 
     // MARK: - Initialization
 
@@ -448,6 +471,19 @@ private struct ChildScrollViewInfo {
         ] {
             c.isActive = true
         }
+    }
+
+    func embed(view: UIView) {
+        view.backgroundColor = .clear
+        view.frame = self.bounds
+        view.translatesAutoresizingMaskIntoConstraints = false
+        self.addSubview(view)
+        NSLayoutConstraint.activate([
+            view.leadingAnchor.constraint(equalTo: self.leadingAnchor),
+            view.trailingAnchor.constraint(equalTo: self.trailingAnchor),
+            view.heightAnchor.constraint(equalTo: self.heightAnchor),
+            view.topAnchor.constraint(equalTo: self.topAnchor)
+        ])
     }
 
     private func setup() {
@@ -519,6 +555,18 @@ private struct ChildScrollViewInfo {
     }
 
     // MARK: - View methods
+    private func setNeedsRespositioning() {
+        needsRespositioning = true
+        self.setNeedsLayout()
+    }
+
+    private func removeOverlayIfNeeded() {
+        if self.shouldRemoveOverlay, let overlay = self.overlay {
+            overlay.removeFromSuperview()
+            self.overlay = nil
+            self.shouldRemoveOverlay = false
+        }
+    }
 
     public override func layoutSubviews() {
         super.layoutSubviews()
@@ -529,9 +577,12 @@ private struct ChildScrollViewInfo {
             view.frame.origin.y = 0
         }
 
-        if self.orientationChanged {
+        removeOverlayIfNeeded()
+
+        if self.orientationChanged || needsRespositioning {
             self.updateSnapPosition(animated: false)
             self.orientationChanged = false
+            needsRespositioning = false
         }
     }
 
@@ -546,38 +597,48 @@ private struct ChildScrollViewInfo {
     ///
     /// - parameter position The position to be set.
     /// - parameter animated Wheter the change should be animated or not.
-    public func setPosition(_ position: DrawerPosition, animated: Bool) {
-        guard let superview = self.superview else {
-            log("ERROR: Not contained in a view.")
-            log("ERROR: Could not evaluate snap position for \(position)")
-            return
-        }
+    public func setPosition(_ position: DrawerPosition, animated: Bool, completion: ((Bool) -> Void)? = nil) {
 
-        //updateBackgroundVisuals(self.backgroundView)
+        // Don't notify about position if concealing the drawer. Notify only if position changed.
+        let visiblePosition = (_isConcealed ? .closed : position)
+        let notifyDelegate = !_isConcealed && (currentPosition != visiblePosition)
+        self.setPosition(position, animated: animated, notifyDelegate: notifyDelegate, completion: completion)
+    }
+
+    private func setPosition(_ position: DrawerPosition, animated: Bool, notifyDelegate: Bool, completion: ((Bool) -> Void)? = nil) {
         // Get the next available position. Closed position is always supported.
+        let visiblePosition = (_isConcealed ? .closed : position)
 
-        // Notify only if position changed.
-        let visiblePosition: DrawerPosition = (_isConcealed ? .closed : position)
-        // Don't notify about position if concealing the drawer.
-        let notifyPosition = !_isConcealed && (currentPosition != visiblePosition)
-        if notifyPosition {
+        if notifyDelegate {
             self.delegate?.drawer?(self, willTransitionFrom: currentPosition, to: position)
         }
 
         self.currentPosition = position
 
-        let nextSnapPosition = snapPosition(for: visiblePosition, inSuperView: superview)
-        self.scrollToPosition(nextSnapPosition, animated: animated, notifyDelegate: true) { _ in
-            if notifyPosition {
+        let nextSnapPosition: CGFloat
+
+        if let superview = self.superview {
+            nextSnapPosition = snapPosition(for: visiblePosition, inSuperView: superview)
+            self.scrollToPosition(nextSnapPosition, animated: animated, notifyDelegate: true) { finished in
+                if notifyDelegate {
+                    self.delegate?.drawer?(self, didTransitionTo: visiblePosition)
+                }
+                completion?(finished)
+            }
+        } else {
+            // No superview, so only notify.
+            if notifyDelegate {
                 self.delegate?.drawer?(self, didTransitionTo: visiblePosition)
             }
+            completion?(false)
         }
     }
 
     private func scrollToPosition(_ scrollPosition: CGFloat, animated: Bool, notifyDelegate: Bool, completion: ((Bool) -> Void)? = nil) {
+
         if previousAnimator?.isRunning == true {
             previousAnimator?.stopAnimation(false)
-            if let s = previousAnimator?.state, s == .stopped {
+            if let state = previousAnimator?.state, state == .stopped {
                 previousAnimator?.finishAnimation(at: .current)
             }
             previousAnimator = nil
@@ -586,7 +647,7 @@ private struct ChildScrollViewInfo {
         if animated {
             // Create the animator.
             let animator = UIViewPropertyAnimator(
-                duration: 0.5,
+                duration: drawerAnimationDuration,
                 timingParameters: UISpringTimingParameters(dampingRatio: 0.8))
             animator.addAnimations {
                 self.setScrollPosition(scrollPosition, notifyDelegate: notifyDelegate)
@@ -606,6 +667,8 @@ private struct ChildScrollViewInfo {
                         self.setScrollPosition(f.minY, notifyDelegate: false)
                     }
                 }
+
+                self.removeOverlayIfNeeded()
 
                 if let completion = completion {
                     DispatchQueue.main.async {
@@ -685,6 +748,7 @@ private struct ChildScrollViewInfo {
             let frame = self.layer.presentation()?.frame ?? self.frame
             self.panOrigin = frame.origin.y
             self.horizontalPanOnly = true
+            self.drawerPanStarted = false
 
             updateScrollPosition(whileDraggingAtPoint: panOrigin, notifyDelegate: true)
 
@@ -732,7 +796,7 @@ private struct ChildScrollViewInfo {
                     }
 
                     if self.horizontalPanOnly {
-                        log("Vertical pan cancelled due to direction lock")
+                        log("Vertical pan cancelled due to directional lock")
                         break
                     }
                 }
@@ -762,8 +826,7 @@ private struct ChildScrollViewInfo {
                 // Disable child view scrolling
                 if !shouldScrollChildView && childScrollEnabled {
 
-                    startedDragging = true
-
+                    drawerPanStarted = true
                     sender.setTranslation(CGPoint.zero, in: self)
 
                     // Scrolling downwards and content was consumed, so disable
@@ -793,14 +856,14 @@ private struct ChildScrollViewInfo {
                             let pos = self.panOrigin
                             self.updateScrollPosition(whileDraggingAtPoint: pos, notifyDelegate: true)
                     }, completion: nil)
-                } else if !shouldScrollChildView {
+                } else if !shouldScrollChildView && abs(translation.y) > 0 {
                     // Scroll only if we're not scrolling the subviews.
-                    startedDragging = true
+                    drawerPanStarted = true
                     let pos = panOrigin + translation.y
                     updateScrollPosition(whileDraggingAtPoint: pos, notifyDelegate: true)
                 }
-            } else {
-                startedDragging = true
+            } else if abs(translation.y) > 0 {
+                drawerPanStarted = true
                 let pos = panOrigin + translation.y
                 updateScrollPosition(whileDraggingAtPoint: pos, notifyDelegate: true)
             }
@@ -820,7 +883,7 @@ private struct ChildScrollViewInfo {
             if activeScrollViews.contains(where: { $0.scrollView.contentOffset.y > 0 }) {
                 // Let it scroll.
                 log("Let child view scroll.")
-            } else if startedDragging {
+            } else if drawerPanStarted {
                 self.delegate?.drawerWillEndDragging?(self)
 
                 // Check velocity and snap position separately:
@@ -846,7 +909,7 @@ private struct ChildScrollViewInfo {
             self.childScrollViews.forEach { $0.scrollView.isScrollEnabled = $0.scrollWasEnabled }
             self.childScrollViews = []
 
-            startedDragging = false
+            drawerPanStarted = false
 
         default:
             break
@@ -855,14 +918,8 @@ private struct ChildScrollViewInfo {
 
     @objc private func onTapOverlay(_ sender: UITapGestureRecognizer) {
         if sender.state == .ended {
-
             if let prevPosition = self.snapPositionsDescending.advance(from: self.position, offset: -1) {
-
-                self.delegate?.drawer?(self, willTransitionFrom: currentPosition, to: prevPosition)
-
-                self.setPosition(prevPosition, animated: true)
-
-                self.delegate?.drawer?(self, didTransitionTo: prevPosition)
+                self.setPosition(prevPosition, animated: true, notifyDelegate: true)
             }
         }
     }
@@ -909,7 +966,11 @@ private struct ChildScrollViewInfo {
     fileprivate func snapPosition(for position: DrawerPosition, inSuperView superview: UIView) -> CGFloat {
         switch position {
         case .open:
-            return self.topMargin
+            if let height = self.openHeight {
+                return max(self.topMargin, superview.bounds.height - bottomInset - height)
+            } else {
+                return self.topMargin
+            }
         case .partiallyOpen:
             return superview.bounds.height - bottomInset - self.partiallyOpenHeight
         case .collapsed:
@@ -996,7 +1057,7 @@ private struct ChildScrollViewInfo {
 
     private func updateOverlayVisuals(_ overlay: Overlay?) {
         overlay?.backgroundColor = UIColor.black
-        overlay?.cutCornerSize = self.cornerRadius
+        overlay?.cornerRadius = self.cornerRadius
     }
 
     private func updateBackgroundVisuals(_ backgroundView: UIVisualEffectView) {
@@ -1022,8 +1083,9 @@ private struct ChildScrollViewInfo {
         if automaticallyAdjustChildContentInset {
             let bottomInset = self.bottomInset
             self.adjustChildContentInset(self, bottomInset: bottomInset)
-            self.updateSnapPosition(animated: true)
-        }
+            self.setNeedsRespositioning()
+            self.setNeedsLayout()
+       }
     }
 
     private func adjustChildContentInset(_ view: UIView, bottomInset: CGFloat) {
@@ -1049,22 +1111,18 @@ private struct ChildScrollViewInfo {
         let overlay = Overlay(frame: superview.bounds)
         overlay.isHidden = self.isHidden
         overlay.translatesAutoresizingMaskIntoConstraints = false
-        overlay.alpha = 0
+        overlay.alpha = 0.0
         overlayTapRecognizer = UITapGestureRecognizer(target: self, action: #selector(onTapOverlay))
         overlay.addGestureRecognizer(overlayTapRecognizer)
 
         superview.insertSubview(overlay, belowSubview: self)
 
-        let constraints = [
+        NSLayoutConstraint.activate([
             overlay.leadingAnchor.constraint(equalTo: superview.leadingAnchor),
             overlay.trailingAnchor.constraint(equalTo: superview.trailingAnchor),
             overlay.heightAnchor.constraint(equalTo: superview.heightAnchor),
-            overlay.bottomAnchor.constraint(equalTo: superview.bottomAnchor)
-        ]
-
-        for constraint in constraints {
-            constraint.isActive = true
-        }
+            overlay.bottomAnchor.constraint(equalTo: superview.bottomAnchor),
+        ])
 
         updateOverlayVisuals(overlay)
 
@@ -1109,11 +1167,11 @@ private struct ChildScrollViewInfo {
         if opacityFactor > 0 {
             self.overlay = self.overlay ?? createOverlay()
             self.overlay?.alpha = opacityFactor * kOverlayOpacity
+            self.shouldRemoveOverlay = false
         } else {
-            self.overlay?.removeFromSuperview()
-            self.overlay = nil
+            self.overlay?.alpha = 0
+            self.shouldRemoveOverlay = true
         }
-
     }
 
     private func setShadowOpacity(forScrollPosition position: CGFloat) {
@@ -1203,6 +1261,24 @@ private struct ChildScrollViewInfo {
             .first?.snap
 
         return topPosition ?? 0
+    }
+
+    private var openHeight: CGFloat? {
+        guard let superview = self.superview else {
+            return nil
+        }
+        switch self.openHeightBehavior {
+        case .none:
+            return nil
+        case .fitting:
+            let fittingSize = self.systemLayoutSizeFitting(
+                CGSize(width: superview.bounds.size.width, height: 0),
+                withHorizontalFittingPriority: .required,
+                verticalFittingPriority: .defaultLow)
+            return fittingSize.height
+        case .fixed(let height):
+            return height
+        }
     }
 
     private var currentSnapPosition: CGFloat {
@@ -1401,4 +1477,3 @@ fileprivate func log(_ message: String) {
         print("\(dateFormatter.string(from: Date())): \(message)")
     }
 }
-
